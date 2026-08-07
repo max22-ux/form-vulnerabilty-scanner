@@ -1,0 +1,2 @@
+├── requester.py      # Envío de requests
+ ── parser.py         # Parseo de HTML/forms
