@@ -1,0 +1,518 @@
+
+core/
+parser.py
+requester.py
+
+detectors/
+form_detector.py
+sqli.py
+xss.py
+
+report/
+json_manager.py
+
+main.py
+
+
+main.py
+from core import parser
+from report import json_manager
+import argparse
+import logging
+
+def obtener_argumentos():
+	parse = argparse.ArgumentParser(description="Escaner de formularios vulnerables")
+	parse.add_argument("-u","--url",required=True,help="URL objetivo ej:(https://google.com)")
+	parse.add_argument("-o","--output",default="reporte.json",help="Nombre del json ej:(reporte.json)")
+	return parse.parse_args()
+
+def main():
+	print("[Scanner iniciado]")
+
+	args = obtener_argumentos()
+	url = args.url
+	output = args.output
+
+	logging.basicConfig(
+		level=logging.INFO,
+		format="%(asctime)s %(levelname)s %(message)s"
+		)
+	
+	if not output.endswith(".json"):
+		output+=".json"
+
+	path = json_manager.report(output)
+		if url.startswith("http://") or url.startswith("https://"):
+		logging.info("Target: %s", url)
+		parser.escaner(url,path)
+	else:
+		logging.error("No se especifico si la url, empieza con http o https")
+
+
+if __name__ == "__main__":
+	main()
+
+
+parser.py
+from bs4 import BeautifulSoup
+from urllib.parse import *
+from core import requester
+from detectors import form_detector, sqli, xss
+from report.json_manager import ReportManager 
+import logging
+logger = logging.getLogger(__name__)
+
+status_massaje = {
+	200: 'OK',
+	201: 'Created',
+	204: 'No Content',
+	301: 'Redirect',
+	302: 'Redirect',
+	400: 'Bad request',
+	401: 'Unauthorized',
+	404: 'Not Found',
+	500: 'Server Error'
+}
+
+def escaner(url,path):
+	try:
+		res = requester.devolver_res(url)
+		url = requester.devolver_url(url)
+		soup = BeautifulSoup(res.text,"html.parser")
+		cont = 0
+		cont=len(soup.find_all('form'))
+		logger.info("Forms detectados %d", cont)
+		logger.info("contenido: %s",res.headers['Content-Type'])
+		logger.info("%s %d %s --> %s", res.request.method, res.status_code, status_massaje.get(res.status_code), soup.title)
+		form(soup,url,res,path)
+	except Exception as e:
+		logger.error("Ha ocurrido un error %s",e)
+
+def form(soup,url,r,path):
+	report_manager = ReportManager(path)
+	report_manager.cargar_json()
+	for form in soup.find_all('form'):
+		res = urlparse(url)		
+		action_url = form_detector.vulnerabilidades(form,res,url,path,report_manager)
+		if urlparse(action_url).netloc != urlparse(url).netloc:
+			logger.warning("Saltando dominio externo")
+			continue
+		tags_input = []
+		cant_input = []
+
+		#Busca los inputs dentro del formulario y el type y lo guardamos en un array		
+		formulario = form.find_all('input')
+		for f in formulario:
+			cant_input.append(f)
+			tags_input.append(f.get('type'))
+		print("\n")
+		#Detectar el tipo de formulario
+		tipo_formulario = form_detector.tipo_form(tags_input,form)
+		logger.info("Formulario detectado: posible %s",tipo_formulario)
+	
+		#imprimimos los campos
+		for cant in range(len(formulario)):
+			type_tag = cant_input[cant]
+			if type_tag is not None:
+				tipo = type_tag.get('type')
+				name = cant_input[cant].get('name')
+				valor =cant_input[cant].get('value')
+				datos = {"tipo":tipo,
+					"name":name,
+					"value":valor}
+				report_manager.agregar_resultado("inputs",datos)
+				logger.info(f"%s %d--> Found %s --> Nombre:%s --> Valor:%s",r.request.method,r.status_code,type_tag.get('type'),cant_input[cant].get('name') ,cant_input[cant].get('value'))
+			else:
+				logger.error("Not found --> Campo: %s",type_tag)
+		print("\n")
+		#detectar el tipo de vulnerabilidad en cada campo
+		form_detector.campos_vulnerables(tags_input,cant_input,res,form,report_manager)
+		method = form_detector.method_form(form)
+
+		#Probamos los playloads	
+		sqli.envio_sql(method,action_url,path,report_manager)
+		xss.envio_xss(method,action_url,path,report_manager)
+		requester.nivel_de_riesgo(path,report_manager)
+
+
+requester.py
+import requests
+import json
+import logging
+logger = logging.getLogger(__name__)
+
+class Requester:
+	def __init__(self):
+		import requests
+		self.session = requests.Session()
+
+	def send(self, method, url, data=None):
+		try:
+			return self.session.request(method.upper(),url, timeout=5,data=data)
+		except requests.RequestException as e:
+			logger.error("%s",e)
+			return None
+
+
+def devolver_res(url):
+	#especificamos la url
+	r = requests.get(url, timeout=5)
+	return r
+
+def devolver_url(url):
+	return url
+
+def nivel_de_riesgo(path,report_manager):
+	with open(path, "r") as f:
+		data = json.load(f)
+
+	puntuaje = data["puntuaje"]
+	if puntuaje >= 20:
+		data["nivel_de_riesgo"] = "HIGH" 
+	elif puntuaje >= 10:
+		data["nivel_de_riesgo"] = "MEDIUM"
+	else:
+		data["nivel_de_riesgo"] = "LOW"
+
+	with open(path,"w") as f:
+		json.dump(data,f,indent=4)				
+
+
+form_detector.py
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import *
+import os
+import logging
+logger = logging.getLogger(__name__)
+
+vuln_CSRF = [
+	'csrf',
+	'csrf_token',
+	'xsrf',
+	'token',
+	'_token',
+	'nonce',
+	'user_token',
+	'authenticity_token'
+]
+
+def tipo_form(tags_input,form):
+	textarea = form.find('textarea')	
+	if 'text' in tags_input and 'password' in tags_input and 'email' in tags_input:
+		return 'Registro'
+	elif ('text' in tags_input or 'email' in tags_input) and 'password' in tags_input:
+		return 'Login'
+	elif textarea is not None and 'submit' in tags_input:
+		return 'Comentario'
+	elif 'text' in tags_input and 'password' not in tags_input:
+		return 'Busqueda'
+	else:
+		return 'No se encontro el tipo de formulario..'
+
+#detectamos los campos basicos del formulario
+def vulnerabilidades(form,res,url,path,report_manager):
+	action = form.get("action")
+	method = form.get("method","GET")
+	logger.info("[+]Method--> %s",method)
+	if action is not None:
+		logger.info("[+]Datos enviados de-[ %s://%s]-a-[%s]",res.scheme,res.hostname,action)
+		logger.info("[+]action--> %s",action)
+		action_url = urljoin(url,action)
+	else:
+		report_manager.sumar_score("puntuaje",8)
+		action_url = url
+		report_manager.agregar_resultado("vulnerabilidades",{'tipo':'campo action vacio',
+			'detalle': 'los datos del formulario no se envian a ningun lado'})
+	return action_url
+
+#detectamos los campos vulnerables
+def campos_vulnerables(tags_input,cant_input,res,form,report_manager):
+	#detectamos el tipo de vulnerabilidad
+	if res.scheme == 'http' and 'password' in tags_input:
+		report_manager.sumar_score("puntuaje",8)
+		report_manager.agregar_resultado("riesgo_total",{
+			'tipo': 'Password con HTTP',
+			'detalle':'La contraseña con la extencion HTTP puede ser interceptada'
+			})
+	method = method_form(form)
+	if method == 'GET' and 'password' in tags_input:
+		report_manager.sumar_score("puntuaje",8)
+		report_manager.agregar_resultado("riesgo_total",{
+			'tipo': 'password enviada con el metodo GET',
+			'detalle':'se envia la contraseña con GET, puede ser legible'
+			})
+	csrf_detectado = False
+	for campo in cant_input:
+		campo_name = (campo.get('name') or '').lower()
+		if campo_name in vuln_CSRF:
+			csrf_detectado = True
+			break	
+		if campo.get('type') == 'hidden':
+			report_manager.sumar_score("puntuaje",3)
+			campo_hidden = {
+			'Vulnerabilidad': 'Campo sospechoso',
+			'tipo': campo.get('type'),
+			'nombre':campo_name,
+			'valor': campo.get('value')	
+			}
+			report_manager.agregar_resultado("riesgo_total",{
+				'tipo': campo_hidden,
+				'detalle': 'campo hidden detectado ,puede contener datos sospechosos (REVISAR)'
+				})
+	if not csrf_detectado:
+		report_manager.sumar_score("puntuaje",4)
+		report_manager.agregar_resultado("riesgo_total",{
+			'tipo': 'Vulnerabilidad CSRF',
+			'detalle':'Posible ausencia de protección CSRF (REVISAR)'
+			}) 
+
+
+def method_form(form):
+	method = form.get('method','GET').upper()
+	if method in ('GET','POST'):
+		return method
+	else:
+		return None
+
+
+sqli.py
+import requests
+from core.requester import Requester
+import json
+import logging
+logger = logging.getLogger(__name__)
+
+SQL_PLAYLOADS = [
+	"' OR '1'='1",
+	"' OR 1=1 --"
+]
+
+CAMPOS_EVITABLES=["submit","hidden","button","reset","file","image"]
+
+ERRORES_SQL = [ "sql syntax",
+    "mysql",
+    "syntax error",
+    "warning",
+    "unterminated",
+    "odbc",
+    "pdo",
+    "database error"]
+
+def envio_sql(method,url,path,report_manager):
+	with open(path,"r") as f:
+		datos = json.load(f)
+	
+	base_data = {}
+	for dato in datos["inputs"]:
+		tipo = dato.get("tipo")
+		name = dato.get("name")
+
+		#saltamos campos, que no nos sirven 
+		if name and tipo not in CAMPOS_EVITABLES:
+			base_data[name] = "test"
+
+	#fuzzing
+	req = Requester()
+	for dato in datos["inputs"]:
+		tipo = dato.get("tipo")
+		name = dato.get("name")
+
+		if not name or tipo in CAMPOS_EVITABLES:
+			continue
+
+		logger.info("Probando campos: %s",name)
+				
+		for playload in SQL_PLAYLOADS:
+			data_test = base_data.copy()
+			data_test[name] = playload
+
+			base_response = req.send(method,url,data=base_data)
+			response = req.send(method, url, data=data_test)
+
+			if base_response is None:
+				continue
+
+			if not response:
+				continue
+
+			logger.info("-> Playload: %s",playload)
+	
+			vulnerabilidad = False
+			pruebas = comprobar_vulnerabilidad(base_response,response)
+			if pruebas["puntuaje"] >= 4:
+				vulnerabilidad = True
+				if vulnerabilidad:
+					logger.warning("Posible SQLI")
+					report_manager.agregar_resultado("vulnerabilidades",{
+						"url": url,
+						"method": method,
+						"type": "SQLi",
+						"campo": name,
+						"playload": playload,
+						"vulnerable": True,
+						"evidencias":pruebas["evidencia"]
+						})
+			elif pruebas["puntuaje"] >= 3:
+				logger.warning("Comportamiento SQLi sospechoso")
+
+			else:
+				logger.info("Comportamiento normal")
+
+
+def comprobar_vulnerabilidad(base_response,response):
+	evidencias = {
+	"puntuaje":0,
+	"evidencia":[]
+	}
+	base_longitud = len(base_response.text)
+	longitud = len(response.text)
+
+	misma_longitud = base_longitud == longitud 
+	mismo_status = base_response.status_code == response.status_code
+	misma_respuesta = base_response.text == response.text
+	
+	#Deteccion por errores SQL
+	vulnerable = False
+	for error in ERRORES_SQL:
+		if response and error.lower() in response.text.lower():
+			vulnerable = True
+			evidencias["evidencia"].append({"Playload":error})
+			break
+
+	if vulnerable:
+		evidencias["puntuaje"] += 1
+
+	if base_response.status_code != response.status_code:
+		evidencias["puntuaje"] += 1
+		evidencias["evidencia"].append({"status_changed":True})
+
+	if not misma_longitud:
+		evidencias["puntuaje"] += 1
+		evidencias["evidencia"].append({"length_changed":True})
+
+	if not misma_respuesta:
+		evidencias["puntuaje"] += 1
+		evidencias["evidencia"].append({"response_different":True})
+
+	return evidencias
+
+
+
+xss.py
+from core.requester import Requester
+import json
+import html
+import logging
+logger = logging.getLogger(__name__)
+
+XSS_PLAYLOADS = [
+	"<script>alert(1)</script>",
+	"\"'><script>alert(1)</script>",
+	"<img src=x onerror=alert(1)>",
+	]
+CAMPOS_EVITABLES=["submit","hidden","button","reset","file","image"]
+
+
+def envio_xss(method,url,path,report_manager):
+	with open(path,"r") as f:
+		datos = json.load(f)
+	base_data = {}
+	for dato in datos["inputs"]:
+		tipo = dato.get("tipo")
+		name = dato.get("name")
+		if name and tipo not in CAMPOS_EVITABLES:
+			base_data[name] = "test"
+	#fuzzing
+	req = Requester()
+	for dato in datos["inputs"]:
+		tipo = dato.get("tipo")
+		name = dato.get("name")
+
+		if not name or tipo in CAMPOS_EVITABLES:
+			continue
+
+		logger.info("Probando campos: %s",name)
+		for playload in XSS_PLAYLOADS:
+			data_test = base_data.copy()
+			data_test[name] = playload
+
+			response = req.send(method, url, data=data_test)
+			logger.info("->Playload: %s",playload)
+			if not response:
+				continue
+			
+			decoded = html.unescape(response.text)
+			if playload in decoded:
+				logger.warning("Posible XSS reflejado") #aparece root, se puede cambiar
+				report_manager.agregar_resultado("vulnerabilidades",{
+					"url": url,
+					"method": method,
+					"type": "XSS",
+					"campo": name,
+					"playload": playload,
+					"vulnerable": True
+					})
+
+
+json_manager.py
+import json
+import os
+from pathlib import Path
+
+class ReportManager:
+    def __init__(self,path):
+        self.path = path
+
+    def cargar_json(self):
+        data = {
+        "inputs": [],
+        "vulnerabilidades": [], 
+        "puntuaje": 0,
+        "riesgo_total": [],
+        "nivel_de_riesgo": ""
+        }
+
+        if not os.path.exists(self.path):
+            with open(self.path, "w") as f:
+                return json.dump(data,f,indent=4)
+
+    def agregar_resultado(self,tipo,dato):
+        try:
+            with open(self.path, "r") as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            data = {
+            "inputs":[],
+            "vulnerabilidades": [], 
+            "puntuaje": 0,
+            "riesgo_total": [],
+            "nivel_de_riesgo" : ""
+            }
+        tipo = tipo.lower()
+
+        if tipo not in data:
+            print(f"[WARN] tipo '{tipo}' no existe. Se crea automaticamente")
+            data[tipo] = []
+
+        data[tipo].append(dato)
+
+        with open(self.path,"w") as f:
+            json.dump(data, f, indent=4)
+
+    def sumar_score(self,lugar,num):
+        with open(self.path,"r") as f:
+            data = json.load(f)
+
+        data[lugar] += num
+
+        with open(self.path, "w") as f:
+            json.dump(data,f,indent=4)
+
+
+def report(output):  #origen del path
+    # raíz del proyecto (sube niveles según dónde esté el archivo)
+    ROOT_DIR = Path(__file__).resolve().parent.parent
+    # ruta a report/reporte.json
+    report_path = ROOT_DIR / "report" / output
+    return report_path

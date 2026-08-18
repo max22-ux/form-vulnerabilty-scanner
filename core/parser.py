@@ -2,8 +2,9 @@ from bs4 import BeautifulSoup
 from urllib.parse import *
 from core import requester
 from detectors import form_detector, sqli, xss
-from report import json_manager
-
+from report.json_manager import ReportManager 
+import logging
+logger = logging.getLogger(__name__)
 
 status_massaje = {
 	200: 'OK',
@@ -17,24 +18,29 @@ status_massaje = {
 	500: 'Server Error'
 }
 
-def escaner(url):
+def escaner(url,path):
 	try:
 		res = requester.devolver_res(url)
 		url = requester.devolver_url(url)
 		soup = BeautifulSoup(res.text,"html.parser")
-		print(f"[+]Campo field detectado {soup.find_all('fieldset')}")
-		print(f"[+]contenido: {res.headers['Content-Type']}")
-		print(f"[+]{res.request.method} {res.status_code} {status_massaje.get(res.status_code)} --> {soup.title}")
-		form(soup,url,res)
+		cont = 0
+		cont=len(soup.find_all('form'))
+		logger.info("Forms detectados %d", cont)
+		logger.info("contenido: %s",res.headers['Content-Type'])
+		logger.info("%s %d %s --> %s", res.request.method, res.status_code, status_massaje.get(res.status_code), soup.title)
+		form(soup,url,res,path)
 	except Exception as e:
-		print(f"Ha ocurrido un error.{e}")
+		logger.error("Ha ocurrido un error %s",e)
 
-def form(soup,url,r):
+def form(soup,url,r,path):
+	report_manager = ReportManager(path)
+	report_manager.cargar_json()
 	for form in soup.find_all('form'):
-		res = urlparse(url)
-		path = json_manager.report()
-		json_manager.cargar_json(path)
-		action_url = form_detector.vulnerabilidades(form,res,url,path)
+		res = urlparse(url)		
+		action_url = form_detector.vulnerabilidades(form,res,url,path,report_manager)
+		if urlparse(action_url).netloc != urlparse(url).netloc:
+			logger.warning("Saltando dominio externo")
+			continue
 		tags_input = []
 		cant_input = []
 
@@ -46,7 +52,7 @@ def form(soup,url,r):
 		print("\n")
 		#Detectar el tipo de formulario
 		tipo_formulario = form_detector.tipo_form(tags_input,form)
-		print(f'[+] Formulario detectado como --> {tipo_formulario}')
+		logger.info("Formulario detectado: posible %s",tipo_formulario)
 	
 		#imprimimos los campos
 		for cant in range(len(formulario)):
@@ -58,15 +64,16 @@ def form(soup,url,r):
 				datos = {"tipo":tipo,
 					"name":name,
 					"value":valor}
-				json_manager.agregar_resultado(path,"inputs",datos)
-				print(f"[+]{r.request.method} {r.status_code}--> Found {type_tag.get('type')} --> Nombre:{cant_input[cant].get('name')} --> Valor:{cant_input[cant].get('value')}")
+				report_manager.agregar_resultado("inputs",datos)
+				logger.info(f"%s %d--> Found %s --> Nombre:%s --> Valor:%s",r.request.method,r.status_code,type_tag.get('type'),cant_input[cant].get('name') ,cant_input[cant].get('value'))
 			else:
-				print(f"[-]Not found --> Campo:{type_tag}")
+				logger.error("Not found --> Campo: %s",type_tag)
 		print("\n")
 		#detectar el tipo de vulnerabilidad en cada campo
-		direccion = form_detector.campos_vulnerables(tags_input,cant_input,res,form)
+		form_detector.campos_vulnerables(tags_input,cant_input,res,form,report_manager)
 		method = form_detector.method_form(form)
 
 		#Probamos los playloads	
-		sqli.envio_sql(method,action_url,direccion)
-		xss.envio_xss(method,action_url,direccion)
+		sqli.envio_sql(method,action_url,path,report_manager)
+		xss.envio_xss(method,action_url,path,report_manager)
+		requester.nivel_de_riesgo(path,report_manager)

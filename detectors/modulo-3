@@ -1,3 +1,0 @@
-├── form_detector.py  # Detecta forms y tipos de input
-── sqli.py           # SQL Injection
-── xss.py            # XSS

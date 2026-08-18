@@ -1,8 +1,9 @@
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import *
-from report import json_manager
 import os
+import logging
+logger = logging.getLogger(__name__)
 
 vuln_CSRF = [
 	'csrf',
@@ -28,76 +29,67 @@ def tipo_form(tags_input,form):
 	else:
 		return 'No se encontro el tipo de formulario..'
 
-def vulnerabilidades(form,res,url,path):
+#detectamos los campos basicos del formulario
+def vulnerabilidades(form,res,url,path,report_manager):
 	action = form.get("action")
 	method = form.get("method","GET")
-	print(f"[+]Method--> {method}")
-	enctype = form.get("enctype")
+	logger.info("[+]Method--> %s",method) 
 	if action is not None:
-		print(f"[+]Datos enviados de-[{res.scheme}://{res.hostname}]-a-[{action}]")
-		print(f"[+]action--> {action}")
+		logger.info("[+]Datos enviados de-[ %s://%s]-a-[%s]",res.scheme,res.hostname,action)
+		logger.info("[+]action--> %s",action)
 		action_url = urljoin(url,action)
 	else:
-		json_manager.sumar_score(path,"puntuaje",8)
+		report_manager.sumar_score("puntuaje",8)
 		action_url = url
-		json_manager.agregar_resultado(path,"vulnerabilidades",{'tipo':'campo action vacio',
+		report_manager.agregar_resultado("vulnerabilidades",{'tipo':'campo action vacio',
 			'detalle': 'los datos del formulario no se envian a ningun lado'})
-	if enctype is not None:
-		print(f"[+]Enctype--> {enctype}")
-	else:
-		json_manager.sumar_score(path,"puntuaje",8)
-		json_manager.agregar_resultado(path,"vulnerabilidades",{
-			'tipo': 'Enctype no especificado',
-			'detalle': 'metodo del formulario no encontrado'
-			})
 	return action_url
 
-
-def campos_vulnerables(tags_input,cant_input,res,form):
+#detectamos los campos vulnerables
+def campos_vulnerables(tags_input,cant_input,res,form,report_manager):
 	#detectamos el tipo de vulnerabilidad
-	path = json_manager.report()
 	if res.scheme == 'http' and 'password' in tags_input:
-		json_manager.sumar_score(path,"puntuaje",8)
-		json_manager.agregar_resultado(path,"riesgo_total",{
+		report_manager.sumar_score("puntuaje",8)
+		report_manager.agregar_resultado("riesgo_total",{
 			'tipo': 'Password con HTTP',
 			'detalle':'La contraseña con la extencion HTTP puede ser interceptada'
 			})
 	method = method_form(form)
 	if method == 'GET' and 'password' in tags_input:
-		json_manager.sumar_score(path,"puntuaje",8)
-		json_manager.agregar_resultado(path,"riesgo_total",{
+		report_manager.sumar_score("puntuaje",8)
+		report_manager.agregar_resultado("riesgo_total",{
 			'tipo': 'password enviada con el metodo GET',
 			'detalle':'se envia la contraseña con GET, puede ser legible'
 			})
 	csrf_detectado = False
 	for campo in cant_input:
 		campo_name = (campo.get('name') or '').lower()
-		if not any(token in campo_name for token in vuln_CSRF):  #any() devuelve True o False
+		if campo_name in vuln_CSRF:
 			csrf_detectado = True
-			break
-
-	if csrf_detectado:
-		json_manager.sumar_score(path,"puntuaje",8)
-		json_manager.agregar_resultado(path,"riesgo_total",{
-			'tipo': 'Vulnerabilidad CSRF',
-			'detalle':'No se detecto token CSRF valido'
-			}) 
-
+			break	
 		if campo.get('type') == 'hidden':
-			json_manager.agregar_resultado(path,"score",3)
+			report_manager.sumar_score("puntuaje",3)
 			campo_hidden = {
 			'Vulnerabilidad': 'Campo sospechoso',
 			'tipo': campo.get('type'),
 			'nombre':campo_name,
 			'valor': campo.get('value')	
 			}
-			json_manager.agregar_resultado(path,"riesgo_total",{
+			report_manager.agregar_resultado("riesgo_total",{
 				'tipo': campo_hidden,
-				'detalle': 'campo sospechoso'
-				})		
-	return path
+				'detalle': 'campo hidden detectado ,puede contener datos sospechosos (REVISAR)'
+				})
+	if not csrf_detectado:
+		report_manager.sumar_score("puntuaje",4)
+		report_manager.agregar_resultado("riesgo_total",{
+			'tipo': 'Vulnerabilidad CSRF',
+			'detalle':'Posible ausencia de protección CSRF (REVISAR)'
+			}) 
 
 
 def method_form(form):
 	method = form.get('method','GET').upper()
-	return method
+	if method in ('GET','POST'):
+		return method
+	else:
+		return None
