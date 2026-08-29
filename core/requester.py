@@ -10,19 +10,23 @@ class Requester:
 
 	def send(self, method, url, data=None):
 		try:
-			return self.session.request(method.upper(),url, timeout=5,data=data)
+			
+			if method.upper() == "GET":
+				return self.session.request(method, url, params=data, timeout=5)
+
+			return self.session.request(method, url, data=data, timeout=5)
 		except requests.RequestException as e:
 			logger.error("%s",e)
 			return None
 
-
 def devolver_res(url):
 	#especificamos la url
-	r = requests.get(url, timeout=5)
-	return r
+	try:
+		r = requests.get(url, timeout=5)
+		return r
+	except Exception as e:
+		logger.error(f"Ha ocurrido un error {e}")
 
-def devolver_url(url):
-	return url
 
 def nivel_de_riesgo(path,report_manager):
 	with open(path, "r") as f:
@@ -30,12 +34,9 @@ def nivel_de_riesgo(path,report_manager):
 
 	puntuaje = data["puntuaje"]
 	if puntuaje >= 20:
-		data["nivel_de_riesgo"] = "HIGH" 
+		report_manager.agregar_resultado("nivel_de_riesgo","HIGH") 
 	elif puntuaje >= 10:
-		data["nivel_de_riesgo"] = "MEDIUM"
+		report_manager.agregar_resultado("nivel_de_riesgo","MEDIUM")
 	else:
-		data["nivel_de_riesgo"] = "LOW"
-
-	with open(path,"w") as f:
-		json.dump(data,f,indent=4)
+		report_manager.agregar_resultado("nivel_de_riesgo","LOW")
 		

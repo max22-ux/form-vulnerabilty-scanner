@@ -1,4 +1,3 @@
-from core.requester import Requester
 import json
 import html
 import logging
@@ -9,23 +8,23 @@ XSS_PLAYLOADS = [
 	"\"'><script>alert(1)</script>",
 	"<img src=x onerror=alert(1)>",
 	]
-CAMPOS_EVITABLES=["submit","hidden","button","reset","file","image"]
 
+CAMPOS_EVITABLES= ["submit","hidden","button","reset","file","image"]
 
-def envio_xss(method,url,path,report_manager):
-	with open(path,"r") as f:
-		datos = json.load(f)
+def envio_xss(method, url, inputs, req, report_manager):
+
 	base_data = {}
-	for dato in datos["inputs"]:
-		tipo = dato.get("tipo")
-		name = dato.get("name")
+
+	for campo in inputs:
+		tipo = (campo.get("type") or "").lower()
+		name = campo.get("name")
+	
 		if name and tipo not in CAMPOS_EVITABLES:
 			base_data[name] = "test"
-	#fuzzing
-	req = Requester()
-	for dato in datos["inputs"]:
-		tipo = dato.get("tipo")
-		name = dato.get("name")
+	
+	for campo in inputs:
+		tipo = (campo.get("type") or "").lower()
+		name = campo.get("name")
 
 		if not name or tipo in CAMPOS_EVITABLES:
 			continue
@@ -39,96 +38,47 @@ def envio_xss(method,url,path,report_manager):
 			logger.info("->Playload: %s",playload)
 			if not response:
 				continue
-			
-			decoded = html.unescape(response.text)
-			if playload in decoded:
-				logger.warning("Posible XSS reflejado") #aparece root, se puede cambiar
-				report_manager.agregar_resultado("vulnerabilidades",{
-					"url": url,
-					"method": method,
-					"type": "XSS",
-					"campo": name,
-					"playload": playload,
-					"vulnerable": True
-					})
 
+			#Prueba 1
+			texto_original = response.text
+			texto_decodificado = html.unescape(response.text)
+			reflejado = (playload in texto_original or playload in texto_decodificado) 
 
+			if not reflejado:
+				continue
 
-"""
-Pero hay una limitación importante
-Actualmente tu detector realmente está detectando:
-"El payload aparece reflejado en la respuesta"
+			contexto = obtener_contexto(texto_decodificado,playload)
 
-No necesariamente:
-"Existe XSS ejecutable"
-Son cosas diferentes.
+			logger.warning(
+				"Payload reflejado en campo %s",
+				name
+				)
+			if contexto:
+				logger.warning(
+					"Payload reflejado en %s. contexto: %s",
+					name,
+					contexto
+					)
 
-Tienes:
-if not response:
-    continue
-y posteriormente:
+			report_manager.agregar_resultado("vulnerabilidades", {
+			 "url": url,
+			 "method": method,
+			 "type": "XSS",
+			 "campo": name,
+			 "payload": playload,
+			 "vulnerable": False,
+			 "estado": "REFLEJADO",
+			 "description": "El payload fue reflejado en la respuesta. Requiere análisis del contexto."
+			 })
+		
 
-if response:
-El segundo if ya es innecesario, porque si response fuera falso ya hiciste continue.
+def obtener_contexto(texto,playload,margen=100):
+	posicion = texto.find(payload)
 
-Es decir, conceptualmente:
-response no existe
-       ↓
-    continue
-       ↓
-response existe
-       ↓
-analizar respuesta
+	if posicion == -1:
+		return None
 
-Por lo tanto ese segundo if response: sobra.
-Y hay algo muy interesante que podrías agregar
-Ahora mismo tienes:
-payload
-   ↓
-respuesta
-   ↓
-¿payload aparece?
-   ↓
-Posible XSS
+	inicio = max(0, posicion - margen)
+	fin = min(len(texto), posicion + len(payload) + margen)
 
-Podrías evolucionarlo a:
-
-payload
-   ↓
-respuesta
-   ↓
-¿payload aparece?
-   │
-   ├── NO → no detectado
-   │
-   └── SÍ
-        ↓
-   ¿está HTML-encoded?
-        │
-        ├── SÍ → reflexión, pero posiblemente escapada
-        │
-        └── NO
-             ↓
-       reflexión potencialmente peligrosa
-Eso sería una mejora bastante interesante para tu proyecto porque ya no solamente estarías preguntando "¿apareció mi payload?", sino también "¿cómo apareció?".
-Mi valoración
-
-Para un mini scanner educativo, yo diría que tu detector está bastante bien estructurado:
-Parte	Valoración
-Lectura de inputs	✅
-Exclusión de campos	✅
-Fuzzing campo por campo	✅
-Varios payloads	✅
-Copia de parámetros	✅
-html.unescape()	✅ Buena idea
-Detección de reflexión	✅
-Reporte JSON	✅
-Confirmación de ejecución XSS	⚠️ Falta
-Diferenciación de contexto HTML/atributo/JS	⚠️ Falta
-
-Lo más importante: no intentaría hacer que este detector diga simplemente XSS = True cuando encuentra el payload. 
-Mantendría vulnerable: True solo cuando tengas suficientes evidencias, o incluso podrías distinguir entre "reflejado", "potencial" y "confirmado". 
-Eso haría que tu scanner se vea mucho más serio.
-
-
-"""
+	return texto[inicio:fin]

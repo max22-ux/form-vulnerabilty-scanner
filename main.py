@@ -24,11 +24,11 @@ def main():
 		output+=".json"
 
 	path = json_manager.report(output)
-	if url.startswith("http://") or url.startswith("https://"):
+	if not url.startswith("http://") and not url.startswith("https://"):
+		logging.error("la Url debe iniciar con http o https")
+	else:
 		logging.info("Target: %s", url)
 		parser.escaner(url,path)
-	else:
-		logging.error("No se especifico si la url, empieza con http o https")
 
 
 if __name__ == "__main__":

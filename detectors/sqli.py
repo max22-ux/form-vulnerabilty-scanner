@@ -1,80 +1,92 @@
 import requests
-from core.requester import Requester
-import json
 import logging
 logger = logging.getLogger(__name__)
 
-SQL_PLAYLOADS = [
+SQL_PAYLOADS = [
 	"' OR '1'='1",
 	"' OR 1=1 --"
 ]
 
 CAMPOS_EVITABLES=["submit","hidden","button","reset","file","image"]
 
-ERRORES_SQL = [ "sql syntax",
-    "mysql",
-    "syntax error",
-    "warning",
-    "unterminated",
-    "odbc",
-    "pdo",
-    "database error"]
+ERRORES_SQL = [
+	"you have an error in your sql syntax",
+    "mysql_fetch",
+    "mysqli_",
+    "pdoexception",
+    "sqlstate",
+    "odbc sql server driver",
+    "ora-",
+    "postgresql",
+    "sqlite error",]
 
-def envio_sql(method,url,path,report_manager):
-	with open(path,"r") as f:
-		datos = json.load(f)
-	
+def envio_sql(method, url, inputs, req, report_manager):
+
 	base_data = {}
-	for dato in datos["inputs"]:
-		tipo = dato.get("tipo")
-		name = dato.get("name")
+	
+	for campo in inputs:
+		tipo = (campo.get("type") or "").lower()
+		name = campo.get("name")
 
 		#saltamos campos, que no nos sirven 
 		if name and tipo not in CAMPOS_EVITABLES:
 			base_data[name] = "test"
 
 	#fuzzing
-	req = Requester()
-	for dato in datos["inputs"]:
-		tipo = dato.get("tipo")
-		name = dato.get("name")
+
+	for campo in inputs:
+
+		tipo = (campo.get("type") or "").lower()
+		name = campo.get("name")
 
 		if not name or tipo in CAMPOS_EVITABLES:
 			continue
 
 		logger.info("Probando campos: %s",name)
-				
-		for playload in SQL_PLAYLOADS:
+
+		base_response = req.send(
+			method,
+			url,
+			data=base_data
+			)
+
+		if base_response is None:
+			return				
+		
+		for payload in SQL_PAYLOADS:
 			data_test = base_data.copy()
-			data_test[name] = playload
+			data_test[name] = payload
 
-			base_response = req.send(method,url,data=base_data)
-			response = req.send(method, url, data=data_test)
+			response = req.send(
+				method, 
+				url, 
+				data=data_test
+				)
 
-			if base_response is None:
+			if response is None:
 				continue
 
-			if not response:
-				continue
-
-			logger.info("-> Playload: %s",playload)
+			logger.info("-> Playload: %s",payload)
 	
 			vulnerabilidad = False
-			pruebas = comprobar_vulnerabilidad(base_response,response)
-			if pruebas["puntuaje"] >= 4:
+			
+			pruebas = comprobar_vulnerabilidad(
+				base_response,response
+				)
+
+			if pruebas["puntuaje"] >= 5:
 				vulnerabilidad = True
-				if vulnerabilidad:
-					logger.warning("Posible SQLI")
-					report_manager.agregar_resultado("vulnerabilidades",{
-						"url": url,
-						"method": method,
-						"type": "SQLi",
-						"campo": name,
-						"playload": playload,
-						"vulnerable": True,
-						"evidencias":pruebas["evidencia"]
-						})
-			elif pruebas["puntuaje"] >= 3:
+				logger.warning("Posible SQLI")
+				report_manager.agregar_resultado("vulnerabilidades",{
+					"url": url,
+					"method": method,
+					"type": "SQLi",
+					"campo": name,
+					"sql_error": payload,
+					"vulnerable": True,
+					"evidencias":pruebas["evidencia"]
+					})
+			elif pruebas["puntuaje"] >= 4:
 				logger.warning("Comportamiento SQLi sospechoso")
 
 			else:
@@ -89,10 +101,11 @@ def comprobar_vulnerabilidad(base_response,response):
 	base_longitud = len(base_response.text)
 	longitud = len(response.text)
 
-	misma_longitud = base_longitud == longitud 
-	mismo_status = base_response.status_code == response.status_code
 	misma_respuesta = base_response.text == response.text
-	
+
+	diferencia = abs(longitud - base_longitud)
+	cambio_significativo = ( diferencia > max(100, base_longitud * 0.05))
+
 	#Deteccion por errores SQL
 	vulnerable = False
 	for error in ERRORES_SQL:
@@ -102,13 +115,13 @@ def comprobar_vulnerabilidad(base_response,response):
 			break
 
 	if vulnerable:
-		evidencias["puntuaje"] += 1
+		evidencias["puntuaje"] += 3
 
 	if base_response.status_code != response.status_code:
 		evidencias["puntuaje"] += 1
 		evidencias["evidencia"].append({"status_changed":True})
 
-	if not misma_longitud:
+	if cambio_significativo:
 		evidencias["puntuaje"] += 1
 		evidencias["evidencia"].append({"length_changed":True})
 

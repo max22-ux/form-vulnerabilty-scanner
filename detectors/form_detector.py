@@ -1,20 +1,10 @@
 import requests
 from bs4 import BeautifulSoup
+from detectors import csrf_detector
 from urllib.parse import *
-import os
 import logging
 logger = logging.getLogger(__name__)
 
-vuln_CSRF = [
-	'csrf',
-	'csrf_token',
-	'xsrf',
-	'token',
-	'_token',
-	'nonce',
-	'user_token',
-	'authenticity_token'
-]
 
 def tipo_form(tags_input,form):
 	textarea = form.find('textarea')	
@@ -46,7 +36,7 @@ def vulnerabilidades(form,res,url,path,report_manager):
 	return action_url
 
 #detectamos los campos vulnerables
-def campos_vulnerables(tags_input,cant_input,res,form,report_manager):
+def campos_vulnerables(tags_input,cant_input,res,form,report_manager,action):
 	#detectamos el tipo de vulnerabilidad
 	if res.scheme == 'http' and 'password' in tags_input:
 		report_manager.sumar_score("puntuaje",8)
@@ -61,35 +51,13 @@ def campos_vulnerables(tags_input,cant_input,res,form,report_manager):
 			'tipo': 'password enviada con el metodo GET',
 			'detalle':'se envia la contraseña con GET, puede ser legible'
 			})
-	csrf_detectado = False
-	for campo in cant_input:
-		campo_name = (campo.get('name') or '').lower()
-		if campo_name in vuln_CSRF:
-			csrf_detectado = True
-			break	
-		if campo.get('type') == 'hidden':
-			report_manager.sumar_score("puntuaje",3)
-			campo_hidden = {
-			'Vulnerabilidad': 'Campo sospechoso',
-			'tipo': campo.get('type'),
-			'nombre':campo_name,
-			'valor': campo.get('value')	
-			}
-			report_manager.agregar_resultado("riesgo_total",{
-				'tipo': campo_hidden,
-				'detalle': 'campo hidden detectado ,puede contener datos sospechosos (REVISAR)'
-				})
-	if not csrf_detectado:
-		report_manager.sumar_score("puntuaje",4)
-		report_manager.agregar_resultado("riesgo_total",{
-			'tipo': 'Vulnerabilidad CSRF',
-			'detalle':'Posible ausencia de protección CSRF (REVISAR)'
-			}) 
+		
+	csrf_detector.detectar_csrf(method,cant_input,report_manager)
 
 
 def method_form(form):
 	method = form.get('method','GET').upper()
-	if method in ('GET','POST'):
+	if method in ('GET','POST','PUT','DELETE'):
 		return method
 	else:
 		return None
