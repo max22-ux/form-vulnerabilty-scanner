@@ -69,8 +69,8 @@ json_manager.py			Gestión del reporte JSON
 ⚙️ Instalación
 
 Clona el repositorio:
-git clone https://github.com/max-u22/TU-REPOSITORIO.git
-cd TU-REPOSITORIO
+git clone https://github.com/max-u22/form-vulnerabilty-scanner.git
+cd form-vulnerabilty-scanner
 
 Instala las dependencias:
 
